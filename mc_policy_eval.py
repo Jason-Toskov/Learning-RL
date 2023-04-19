@@ -37,7 +37,9 @@ def mc_policy_evaluation(
         G_t = 0
         for i, (s, r) in enumerate(list(zip(ep_info["s"], ep_info["r"]))[::-1]):
             G_t = r + gamma * G_t
-            if s not in ep_info["s"][i::-1] or not first_visit:
+            # TODO: check this reverses properly
+            # Should be fixed but still...
+            if s not in ep_info["s"][::-1][i + 1 :] or not first_visit:
                 state_counter[s] += 1
                 V_s[s] = V_s[s] + (G_t - V_s[s]) / state_counter[s]
 

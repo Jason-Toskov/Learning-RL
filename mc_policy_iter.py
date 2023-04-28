@@ -9,7 +9,7 @@ def mc_policy_iteration(env_params: dict, gamma: int, first_visit: bool = True):
     nS = env_params["num_states"]
     nA = env_params["num_actions"]
 
-    N_0 = 1000
+    N_0 = 100
 
     state_act_count = np.zeros((*nS, nA))
     Q_sa = np.zeros((*nS, nA))
@@ -51,28 +51,31 @@ def mc_policy_iteration(env_params: dict, gamma: int, first_visit: bool = True):
                 policy[s] = eps / nA
                 policy[s][a_opt] = 1 - eps + eps / nA
             else:
-                print("repeat state")
+                pass
+                # print("repeat state")
 
     return Q_sa, policy
 
 
 if __name__ == "__main__":
-    env = gym.make("Blackjack-v1", sab=True)
+    # env = gym.make("Blackjack-v1", sab=True)
+    env = gym.make("CliffWalking-v0")
 
     gamma = 1
-    nS = [obs.n for obs in env.observation_space]
+    # nS = [obs.n for obs in env.observation_space]
+    nS = [env.observation_space.n]
     nA = env.action_space.n
     env_params = {
         "env": env,
         "num_states": nS,
         "num_actions": nA,
-        "num_episodes": int(1e7),
+        "num_episodes": int(1e5),
         "max_iter": int(1e4),
     }
-    Q_sa, policy = mc_policy_iteration(env_params, gamma)
+    Q_sa, policy = mc_policy_iteration(env_params, gamma, first_visit=True)
 
-    print(np.argmax(Q_sa, axis=-1)[10:-10, 1:, 0])
-    print(np.argmax(Q_sa, axis=-1)[10:-10, 1:, 1])
+    # print(np.argmax(Q_sa, axis=-1)[10:-10, 1:, 0])
+    # print(np.argmax(Q_sa, axis=-1)[10:-10, 1:, 1])
 
     # print((1e2 * value_func)[10:-10, 1:, 0].astype(int), "\n")
     # print((1e2 * value_func)[10:-10, 1:, 1].astype(int))

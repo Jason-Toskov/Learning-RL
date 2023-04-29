@@ -1,12 +1,14 @@
 from collections import deque
+import os
 import random
 
 import gymnasium as gym
-from matplotlib import pyplot as plt
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision.transforms as T
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from enums import EnvType
@@ -48,12 +50,37 @@ class AtariState:
             return t
 
 
+class EpisodeMetric:
+    def __init__(self, logger: SummaryWriter):
+        self.logger = logger
+
+        self.episode_reward = 0
+        self.episode_length = 0
+
+    def update(self, reward):
+        self.episode_reward += reward
+        self.episode_length += 1
+
+    def end_episode(self, ep_num):
+        self.logger.add_scalar(
+            "train/episode_reward", self.episode_reward, global_step=ep_num
+        )
+        self.logger.add_scalar(
+            "train/episode_length", self.episode_length, global_step=ep_num
+        )
+
+        self.episode_reward = 0
+        self.episode_length = 0
+
+
 class DQN:
     def __init__(self):
         print("Env creation")
         self.env_type = EnvType.pong
         self.env = gym.make(self.env_type, obs_type="grayscale")
         self.state_buffer = AtariState(4)
+        self.logger = SummaryWriter()
+        self.output_path = "/home/jason/projects/rl_practise/DQN/outputs/"
 
         self.step = 0
         self.max_steps = int(1e7)
@@ -68,16 +95,22 @@ class DQN:
         self.q_function = QNetwork(self.n_frames_in_state, self.env.action_space.n)
         self.q_function = self.q_function.to(self.device)
         self.batch_size = 32
+        # self.logger.add_graph(self.q_function)
 
-        self.loss = nn.MSELoss()
+        self.loss = nn.HuberLoss()
         self.optim = torch.optim.RMSprop(
             self.q_function.parameters(), lr=2.5e-4, momentum=0.95
         )
 
         # Evaluation
-        self.eval_frequency = 20000
+        self.episode_metrics = EpisodeMetric(self.logger)
+        self.current_episode = 0
+        self.global_train_step = 0
+
+        self.eval_num = 1
+        self.eval_frequency = 50000
         self.eval_eps = 0.05
-        self.eval_horizon = 2000
+        self.eval_horizon = 10000
 
         print("Buffer creation")
         self.buffer_length = 10000
@@ -87,6 +120,9 @@ class DQN:
         self.pre_populate_buffer()
 
     def reset_env(self):
+        self.current_episode += 1
+        self.episode_metrics.end_episode(self.current_episode)
+
         state, info = self.env.reset()
         self.state_buffer.reset()
         self.state_buffer.add_frame(state)
@@ -140,6 +176,8 @@ class DQN:
         new_transition = [old_state, action, reward_out, next_state, episode_live]
         self.replay_buffer.append(new_transition)
 
+        self.episode_metrics.update(reward)
+
         if not episode_live:
             self.reset_env()
 
@@ -151,7 +189,7 @@ class DQN:
         # Get predicted Q values
         s_t = torch.stack(states).to(self.device)  # Bx4x84x84
         a_t = torch.tensor(actions, device=self.device).unsqueeze(-1)  # Bx1
-        preds = self.q_function(s_t).gather(1, a_t).squeeze(-1)
+        preds = self.q_function(s_t).gather(1, a_t)
 
         # Get TD targets
         r_t = torch.tensor(rewards, device=self.device)  # Bx1
@@ -162,18 +200,21 @@ class DQN:
             targets = r_t + self.gamma * end_mask * next_q_vals
 
         # Do an update step
-        error = self.loss(targets, preds)
+        error = self.loss(preds, targets.unsqueeze(1))
         self.optim.zero_grad()
         error.backward()
         self.optim.step()
 
+        return error.cpu().item()
+
     def decay_epsilon(self):
         # Linear decay for 1M steps from 1 to 0.1
         if self.eps > 0.1:
-            self.eps = self.eps - (1 - 0.1) / 1e6
+            self.eps = self.eps - ((1 - 0.1) / 1e6)
 
     def eval_average_reward(self):
         rewards_list = []
+        frames_list = []
         eval_env = gym.make(self.env_type, obs_type="grayscale")
 
         def get_action_eval(env, eps, buffer):
@@ -199,19 +240,45 @@ class DQN:
             return env, buffer, rewards_list
 
         eval_env, eval_buffer, rewards_list = reset_eval_env(eval_env, rewards_list)
-        for eval_step in range(self.eval_horizon):
+        episode_len = [0]
+        for eval_step in tqdm(range(self.eval_horizon), desc="Evaluating"):
             action = get_action_eval(eval_env, self.eval_eps, eval_buffer)
-            new_frame, reward, terminated, truncated, info = self.env.step(action)
+            new_frame, reward, terminated, truncated, _ = eval_env.step(action)
             eval_buffer.add_frame(new_frame)
             rewards_list[-1] += reward
 
+            if frames_list is not None:
+                frames_list.append(eval_buffer.state[-1].unsqueeze(0))
+
             if terminated or truncated:
+                if frames_list is not None:
+                    # video_frames = torch.stack(frames_list).unsqueeze(0)
+                    # self.logger.add_video("eval/trajectory", video_frames, fps=15)
+                    # print("wrote video")
+                    frames_list = None
                 eval_env, eval_buffer, rewards_list = reset_eval_env(
                     eval_env, rewards_list
                 )
+                episode_len.append(0)
+            else:
+                episode_len[-1] = episode_len[-1] + 1
 
         # Our metric is the mean reward per episode
-        return sum(rewards_list[:-1]) / len(rewards_list[:-1])
+        avg_reward = sum(rewards_list[:-1]) / len(rewards_list[:-1])
+        self.logger.add_scalar(
+            "eval/average_reward", avg_reward, global_step=self.eval_num
+        )
+
+        self.logger.add_scalar(
+            "eval/n_episodes", len(episode_len), global_step=self.eval_num
+        )
+        self.logger.add_scalar(
+            "eval/avg_ep_steps",
+            sum(episode_len) / len(episode_len),
+            global_step=self.eval_num,
+        )
+
+        self.eval_num += 1
 
     def plot_rewards(self, rewards):
         plt.plot(range(len(rewards)), rewards)
@@ -225,23 +292,34 @@ class DQN:
     def train(self):
         print("Begin training")
         self.reset_env()
-        average_rewards_list = []
 
         for step in tqdm(range(self.max_steps)):
+            self.global_train_step = step
             # Perform one step
             self.env_step()
 
             # Update Q network
-            self.update_q_func()
+            loss = self.update_q_func()
+            self.logger.add_scalar("train/loss", loss, global_step=step)
 
             # Decay epsilon
             self.decay_epsilon()
 
             if step % self.eval_frequency == 0:
-                avg_reward = self.eval_average_reward()
-                print(f"Average reward at step {step} is {avg_reward}")
-                average_rewards_list.append(avg_reward)
-                # self.plot_rewards(average_rewards_list)
+                self.eval_average_reward()
+                torch.save(
+                    self.q_function.state_dict(),
+                    os.path.join(self.output_path, f"q_func_weights_{step}.pt"),
+                )
+
+            # Log metrics
+            self.logger.add_scalar("epsilon", self.eps, global_step=step)
+            self.logger.add_scalar(
+                "train/episode_count", self.current_episode, global_step=step
+            )
+            self.logger.add_scalar(
+                "train/buffer_size", len(self.replay_buffer), global_step=step
+            )
 
 
 if __name__ == "__main__":

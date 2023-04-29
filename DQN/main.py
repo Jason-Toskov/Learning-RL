@@ -3,7 +3,6 @@ import os
 import random
 
 import gymnasium as gym
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision.transforms as T
@@ -38,8 +37,7 @@ class AtariState:
         if not self.enough_frames:
             raise ValueError(f"Buffer only has {len(self._buffer)} frames")
         else:
-            t = np.array(tuple(self._buffer), dtype=np.uint8)
-            return t
+            return np.array(tuple(self._buffer))
 
 
 class EpisodeMetric:
@@ -54,12 +52,8 @@ class EpisodeMetric:
         self.episode_length += 1
 
     def end_episode(self, ep_num):
-        self.logger.add_scalar(
-            "train/episode_reward", self.episode_reward, global_step=ep_num
-        )
-        self.logger.add_scalar(
-            "train/episode_length", self.episode_length, global_step=ep_num
-        )
+        self.logger.add_scalar("train/episode_reward", self.episode_reward, global_step=ep_num)
+        self.logger.add_scalar("train/episode_length", self.episode_length, global_step=ep_num)
 
         self.episode_reward = 0
         self.episode_length = 0
@@ -70,7 +64,9 @@ class DQN:
         print("Env creation")
         self.env_type = EnvType.pong
         self.env = gym.make(self.env_type, obs_type="grayscale")
-        self.state_buffer = AtariState(4)
+        self.frame_hist = 4
+        self.act_size = self.env.action_space.n
+        self.state_buffer = AtariState(self.frame_hist)
         self.logger = SummaryWriter()
         self.output_path = "/home/jason/projects/rl_practise/DQN/outputs/"
 
@@ -79,20 +75,20 @@ class DQN:
 
         self.eps = 1
         self.gamma = 0.99
-        self.n_frames_in_state = 4
 
         print("Model creation")
         # Model
         self.device = 0 if torch.cuda.is_available() else "cpu"
-        self.q_function = QNetwork(self.n_frames_in_state, self.env.action_space.n)
-        self.q_function = self.q_function.to(self.device)
-        self.batch_size = 128
+        self.policy_net = QNetwork(self.frame_hist, self.act_size).to(self.device)
+        self.target_net = QNetwork(self.frame_hist, self.act_size).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+        self.target_update_rate = 10000
+        self.batch_size = 32
         # self.logger.add_graph(self.q_function)
 
         self.loss = nn.HuberLoss()
-        self.optim = torch.optim.RMSprop(
-            self.q_function.parameters(), lr=2.5e-4, momentum=0.95
-        )
+        self.optim = torch.optim.RMSprop(self.policy_net.parameters(), lr=2.5e-4, momentum=0.95)
 
         # Evaluation
         self.episode_metrics = EpisodeMetric(self.logger)
@@ -105,9 +101,9 @@ class DQN:
         self.eval_horizon = 10000
 
         print("Buffer creation")
-        self.buffer_length = 100000
+        self.buffer_length = 50000
         self.replay_buffer = deque(maxlen=self.buffer_length)
-        self.init_buffer_size = 100000
+        self.init_buffer_size = 50000
         print("Populating buffer")
         self.pre_populate_buffer()
 
@@ -119,7 +115,7 @@ class DQN:
         self.state_buffer.reset()
         self.state_buffer.add_frame(state)
         while not self.state_buffer.enough_frames:
-            action = np.random.randint(self.env.action_space.n)
+            action = np.random.randint(self.act_size)
             new_frame, _, _, _, _ = self.env.step(action)
             self.state_buffer.add_frame(new_frame)
 
@@ -127,7 +123,7 @@ class DQN:
         self.reset_env()
         with tqdm(total=self.init_buffer_size) as pbar:
             while len(self.replay_buffer) < self.init_buffer_size:
-                action = np.random.randint(self.env.action_space.n)
+                action = np.random.randint(self.act_size)
                 self.env_step(action)
                 pbar.update(1)
 
@@ -136,11 +132,12 @@ class DQN:
         if np.random.uniform() > self.eps:
             state_in = torch.tensor(self.state_buffer.state / 255, dtype=torch.float32)
             state_in = state_in.unsqueeze(0).to(self.device)
-            action_prob = self.q_function(state_in).squeeze(0)
+            with torch.no_grad():
+                action_prob = self.policy_net(state_in).squeeze(0)
             action = torch.argmax(action_prob).cpu().item()
         else:
-            action = np.random.randint(self.env.action_space.n)
-        assert isinstance(action, int)
+            action = np.random.randint(self.act_size)
+
         return action
 
     def reward_filter(self, reward):
@@ -162,11 +159,11 @@ class DQN:
         self.state_buffer.add_frame(new_frame)
 
         reward_out = self.reward_filter(reward)
-        next_state = self.state_buffer.state[-1]
+        next_state = np.expand_dims(self.state_buffer.state[-1], 0)
         episode_live = not (terminated or truncated)
 
-        # new_transition = Transition(old_state, action, reward_out, next_state)
-        new_transition = [old_state, action, reward_out, next_state, episode_live]
+        states = np.concatenate((old_state, next_state))
+        new_transition = [states, action, reward_out, episode_live]
         self.replay_buffer.append(new_transition)
 
         self.episode_metrics.update(reward)
@@ -177,23 +174,20 @@ class DQN:
     def update_q_func(self):
         # Sample batch from buffer
         batch_list = random.sample(self.replay_buffer, self.batch_size)
-        states, actions, rewards, next_states, not_terminal = list(zip(*batch_list))
+        states, actions, rewards, not_terminal = list(zip(*batch_list))
 
         # Get predicted Q values
         states_np = np.array(states) / 255
-        s_t = torch.tensor(states_np, dtype=torch.float32).to(self.device)  # Bx4x84x84
+        s_t = torch.tensor(states_np[:, :4], dtype=torch.float32, device=self.device)  # Bx4x84x84
         a_t = torch.tensor(actions, device=self.device).unsqueeze(-1)  # Bx1
-        preds = self.q_function(s_t).gather(1, a_t)
+        preds = self.policy_net(s_t).gather(1, a_t)
 
         # Get TD targets
         r_t = torch.tensor(rewards, device=self.device)  # Bx1
         end_mask = torch.tensor(not_terminal, dtype=int, device=self.device)
-        with torch.no_grad():
-            next_states_np = np.expand_dims(np.array(next_states) / 255, axis=1)
-            s_next_np = np.concatenate((states_np[:, 1:], next_states_np), axis=1)
-            s_next_t = torch.tensor(s_next_np, dtype=torch.float32).to(self.device)
-            next_q_vals, _ = self.q_function(s_next_t).max(axis=1)
-            targets = r_t + self.gamma * end_mask * next_q_vals
+        s_next_t = torch.tensor(states_np[:, 1:], dtype=torch.float32, device=self.device)
+        next_q_vals, _ = self.target_net(s_next_t).max(axis=1)
+        targets = r_t + self.gamma * end_mask * next_q_vals.detach()
 
         # Do an update step
         error = self.loss(preds, targets.unsqueeze(1))
@@ -217,7 +211,7 @@ class DQN:
             if np.random.uniform() > eps:
                 state_in = torch.tensor(buffer.state / 255, dtype=torch.float32)
                 state_in = state_in.unsqueeze(0).to(self.device)
-                action_prob = self.q_function(state_in).squeeze(0)
+                action_prob = self.policy_net(state_in).squeeze(0)
                 action = torch.argmax(action_prob).cpu().item()
             else:
                 action = np.random.randint(env.action_space.n)
@@ -226,7 +220,7 @@ class DQN:
 
         def reset_eval_env(env, rewards_list):
             state, info = env.reset()
-            buffer = AtariState(4)
+            buffer = AtariState(self.frame_hist)
             buffer.reset()
             buffer.add_frame(state)
             while not buffer.enough_frames:
@@ -253,22 +247,16 @@ class DQN:
                 # self.logger.add_video("eval/trajectory", video_frames, fps=15)
                 # print("wrote video")
                 # frames_list = None
-                eval_env, eval_buffer, rewards_list = reset_eval_env(
-                    eval_env, rewards_list
-                )
+                eval_env, eval_buffer, rewards_list = reset_eval_env(eval_env, rewards_list)
                 episode_len.append(0)
             else:
                 episode_len[-1] = episode_len[-1] + 1
 
         # Our metric is the mean reward per episode
         avg_reward = sum(rewards_list[:-1]) / len(rewards_list[:-1])
-        self.logger.add_scalar(
-            "eval/average_reward", avg_reward, global_step=self.eval_num
-        )
+        self.logger.add_scalar("eval/average_reward", avg_reward, global_step=self.eval_num)
 
-        self.logger.add_scalar(
-            "eval/n_episodes", len(episode_len), global_step=self.eval_num
-        )
+        self.logger.add_scalar("eval/n_episodes", len(episode_len), global_step=self.eval_num)
         self.logger.add_scalar(
             "eval/avg_ep_steps",
             sum(episode_len) / len(episode_len),
@@ -276,15 +264,6 @@ class DQN:
         )
 
         self.eval_num += 1
-
-    def plot_rewards(self, rewards):
-        plt.plot(range(len(rewards)), rewards)
-        plt.grid(True)
-        plt.xlabel("Training Epochs")
-        plt.ylabel("Average Reward per Episode")
-        plt.title(f"Average Reward on {self.env_type.name.upper()}")
-        plt.savefig("./rewards_plot.png")
-        plt.clf()
 
     def train(self):
         print("Begin training")
@@ -302,21 +281,21 @@ class DQN:
             # Decay epsilon
             self.decay_epsilon()
 
+            # Update target
+            if step % self.target_update_rate == 0:
+                self.target_net.load_state_dict(self.policy_net.state_dict())
+
             if step % self.eval_frequency == 0:
                 self.eval_average_reward()
                 torch.save(
-                    self.q_function.state_dict(),
+                    self.policy_net.state_dict(),
                     os.path.join(self.output_path, f"q_func_weights_{step}.pt"),
                 )
 
             # Log metrics
             self.logger.add_scalar("epsilon", self.eps, global_step=step)
-            self.logger.add_scalar(
-                "train/episode_count", self.current_episode, global_step=step
-            )
-            self.logger.add_scalar(
-                "train/buffer_size", len(self.replay_buffer), global_step=step
-            )
+            self.logger.add_scalar("train/episode_count", self.current_episode, global_step=step)
+            self.logger.add_scalar("train/buffer_size", len(self.replay_buffer), global_step=step)
 
 
 if __name__ == "__main__":

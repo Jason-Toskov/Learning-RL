@@ -15,14 +15,6 @@ from enums import EnvType
 from models import QNetwork
 
 
-# @dataclass
-# class Transition:
-#     state: torch.Tensor
-#     action: int
-#     reward: float
-#     next_state: torch.Tensor
-
-
 class AtariState:
     def __init__(self, n_frames):
         self.n_frames = n_frames
@@ -32,21 +24,21 @@ class AtariState:
         self._buffer = deque(maxlen=self.n_frames)
 
     def add_frame(self, frame):
-        f_img = torch.tensor(frame / 255).unsqueeze(0).unsqueeze(0)
+        f_img = torch.tensor(frame).unsqueeze(0).unsqueeze(0)
         f_ds = nn.functional.interpolate(f_img, (110, 84))
         f_out = T.functional.center_crop(f_ds, 84)
-        self._buffer.append(f_out.squeeze())
+        self._buffer.append(np.array(f_out.squeeze(), np.uint8))
 
     @property
     def enough_frames(self):
         return len(self._buffer) == self.n_frames
 
     @property
-    def state(self) -> torch.Tensor:
+    def state(self) -> np.array:
         if not self.enough_frames:
             raise ValueError(f"Buffer only has {len(self._buffer)} frames")
         else:
-            t = torch.stack(tuple(self._buffer)).to(torch.float32)
+            t = np.array(tuple(self._buffer), dtype=np.uint8)
             return t
 
 
@@ -94,7 +86,7 @@ class DQN:
         self.device = 0 if torch.cuda.is_available() else "cpu"
         self.q_function = QNetwork(self.n_frames_in_state, self.env.action_space.n)
         self.q_function = self.q_function.to(self.device)
-        self.batch_size = 32
+        self.batch_size = 128
         # self.logger.add_graph(self.q_function)
 
         self.loss = nn.HuberLoss()
@@ -113,9 +105,9 @@ class DQN:
         self.eval_horizon = 10000
 
         print("Buffer creation")
-        self.buffer_length = 10000
+        self.buffer_length = 100000
         self.replay_buffer = deque(maxlen=self.buffer_length)
-        self.init_buffer_size = 10000
+        self.init_buffer_size = 100000
         print("Populating buffer")
         self.pre_populate_buffer()
 
@@ -142,7 +134,8 @@ class DQN:
     def sample_action(self) -> int:
         # Greedy if succeeds, else random
         if np.random.uniform() > self.eps:
-            state_in = self.state_buffer.state.unsqueeze(0).to(self.device)
+            state_in = torch.tensor(self.state_buffer.state / 255, dtype=torch.float32)
+            state_in = state_in.unsqueeze(0).to(self.device)
             action_prob = self.q_function(state_in).squeeze(0)
             action = torch.argmax(action_prob).cpu().item()
         else:
@@ -169,7 +162,7 @@ class DQN:
         self.state_buffer.add_frame(new_frame)
 
         reward_out = self.reward_filter(reward)
-        next_state = self.state_buffer.state
+        next_state = self.state_buffer.state[-1]
         episode_live = not (terminated or truncated)
 
         # new_transition = Transition(old_state, action, reward_out, next_state)
@@ -187,7 +180,8 @@ class DQN:
         states, actions, rewards, next_states, not_terminal = list(zip(*batch_list))
 
         # Get predicted Q values
-        s_t = torch.stack(states).to(self.device)  # Bx4x84x84
+        states_np = np.array(states) / 255
+        s_t = torch.tensor(states_np, dtype=torch.float32).to(self.device)  # Bx4x84x84
         a_t = torch.tensor(actions, device=self.device).unsqueeze(-1)  # Bx1
         preds = self.q_function(s_t).gather(1, a_t)
 
@@ -195,7 +189,9 @@ class DQN:
         r_t = torch.tensor(rewards, device=self.device)  # Bx1
         end_mask = torch.tensor(not_terminal, dtype=int, device=self.device)
         with torch.no_grad():
-            s_next_t = torch.stack(next_states).to(self.device)
+            next_states_np = np.expand_dims(np.array(next_states) / 255, axis=1)
+            s_next_np = np.concatenate((states_np[:, 1:], next_states_np), axis=1)
+            s_next_t = torch.tensor(s_next_np, dtype=torch.float32).to(self.device)
             next_q_vals, _ = self.q_function(s_next_t).max(axis=1)
             targets = r_t + self.gamma * end_mask * next_q_vals
 
@@ -214,12 +210,13 @@ class DQN:
 
     def eval_average_reward(self):
         rewards_list = []
-        frames_list = []
+        # frames_list = []
         eval_env = gym.make(self.env_type, obs_type="grayscale")
 
         def get_action_eval(env, eps, buffer):
             if np.random.uniform() > eps:
-                state_in = buffer.state.unsqueeze(0).to(self.device)
+                state_in = torch.tensor(buffer.state / 255, dtype=torch.float32)
+                state_in = state_in.unsqueeze(0).to(self.device)
                 action_prob = self.q_function(state_in).squeeze(0)
                 action = torch.argmax(action_prob).cpu().item()
             else:
@@ -247,15 +244,15 @@ class DQN:
             eval_buffer.add_frame(new_frame)
             rewards_list[-1] += reward
 
-            if frames_list is not None:
-                frames_list.append(eval_buffer.state[-1].unsqueeze(0))
+            # if frames_list is not None:
+            #     frames_list.append(eval_buffer.state[-1].unsqueeze(0))
 
             if terminated or truncated:
-                if frames_list is not None:
-                    # video_frames = torch.stack(frames_list).unsqueeze(0)
-                    # self.logger.add_video("eval/trajectory", video_frames, fps=15)
-                    # print("wrote video")
-                    frames_list = None
+                # if frames_list is not None:
+                # video_frames = torch.stack(frames_list).unsqueeze(0)
+                # self.logger.add_video("eval/trajectory", video_frames, fps=15)
+                # print("wrote video")
+                # frames_list = None
                 eval_env, eval_buffer, rewards_list = reset_eval_env(
                     eval_env, rewards_list
                 )

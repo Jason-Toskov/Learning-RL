@@ -1,5 +1,7 @@
-venv
+*venv/
+stable
 .vscode
 *__pycache__
-outputs/
+outputs*
 runs/
+logs/

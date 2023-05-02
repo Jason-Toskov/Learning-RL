@@ -4,8 +4,6 @@ from torch.nn import functional as F
 
 from stable_baselines3.common.env_util import make_atari_env
 from stable_baselines3.common.vec_env import VecFrameStack
-from stable_baselines3.common.buffers import ReplayBuffer
-from stable_baselines3.common.utils import polyak_update
 from tqdm import tqdm
 
 from models import QNetwork
@@ -14,7 +12,7 @@ from buffers import RandomBuffer
 
 class DQNTrainer:
     def __init__(self):
-        self.vec_env = make_atari_env("PongNoFrameskip-v4")
+        self.vec_env = make_atari_env("BoxingNoFrameskip-v4")
         self.env = VecFrameStack(self.vec_env, n_stack=4)
         self.obs_shape = self.env.observation_space.shape
         self.obs_dtype = self.env.observation_space.dtype
@@ -48,13 +46,7 @@ class DQNTrainer:
         self.batch_size = 32
         self.max_grad_norm = 10
         self.grad_steps = 1
-        
-        # self.buffer = ReplayBuffer(
-        #     buffer_size=100_000,
-        #     observation_space= env.observation_space,
-        #     action_space=env.action_space,
-        #     device=self.device
-        # )
+
         self.buffer = RandomBuffer(
             buffer_size = 100_000,
             obs_shape = self.obs_shape,
@@ -89,8 +81,7 @@ class DQNTrainer:
     
     def end_step(self):
         if self.step % self.target_update_interval == 0:
-            # self.target_net.load_state_dict(self.policy_net.state_dict())
-            polyak_update(self.policy_net.parameters(), self.target_net.parameters(), 1)
+            self.target_net.load_state_dict(self.policy_net.state_dict())
         
         if self.eps > self.eps_end:
             self.eps = self.eps - ((self.eps_start - self.eps_end) / self.eps_steps_final)

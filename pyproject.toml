@@ -14,6 +14,14 @@ classifiers = [
 ]
 requires-python = ">=3.8"
 
+dependencies = [
+    "stable-baselines3@git+https://github.com/DLR-RM/stable-baselines3#egg=d6ddee9",
+    "pydantic==1.10.7",
+    "pyyaml==6.0",
+    "tqdm==4.65.0",
+    "gymnasium[accept-rom-license,all]"
+]
+
 [tool.setuptools.packages.find]
 include = ["q_networks"]
 
@@ -24,12 +32,3 @@ line_length = 100
 multi_line_output = 3
 include_trailing_comma = true
 virtual_env = "stable_venv"
-
-# rl_zoo3
-# upgrade pip
-# pydantic
-
-# pip install --upgrade pip
-# pip install git+https://github.com/DLR-RM/stable-baselines3
-# pip install -e .
-# pip install pydantic pyyaml tqdm gymnasium[accept-rom-license] gymnasium[all]

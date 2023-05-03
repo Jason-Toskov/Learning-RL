@@ -1,11 +1,10 @@
 *.egg-info/
-*venv/
-stable
 .vscode
 *__pycache__
-outputs*
+
+venv/
+
 runs/
 logs/
-sb_zoo/
-sb3/
+outputs*
 rewards*.txt

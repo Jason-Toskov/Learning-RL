@@ -2,6 +2,7 @@ from collections import deque
 import os
 import random
 
+import cv2
 import gymnasium as gym
 import numpy as np
 import torch
@@ -24,9 +25,9 @@ class AtariState:
 
     def add_frame(self, frame):
         f_img = torch.tensor(frame).unsqueeze(0).unsqueeze(0)
-        f_ds = nn.functional.interpolate(f_img, (110, 84))
-        f_out = T.functional.center_crop(f_ds, 84)
-        self._buffer.append(np.array(f_out.squeeze(), np.uint8))
+        f_img = nn.functional.interpolate(f_img, (84, 84), mode="bilinear")
+        # f_img = T.functional.center_crop(f_img, 84)
+        self._buffer.append(np.array(f_img.squeeze(), np.uint8))
 
     @property
     def enough_frames(self):
@@ -68,7 +69,7 @@ class DQN:
         self.act_size = self.env.action_space.n
         self.state_buffer = AtariState(self.frame_hist)
         self.logger = SummaryWriter()
-        self.output_path = "/home/jason/projects/rl_practise/DQN/outputs/"
+        self.output_path = "/home/jason/projects/Learning-RL/DQN/outputs"
 
         self.step = 0
         self.max_steps = int(1e7)
@@ -85,10 +86,11 @@ class DQN:
         self.target_net.eval()
         self.target_update_rate = 10000
         self.batch_size = 32
+        self.DDQN = True
         # self.logger.add_graph(self.q_function)
 
         self.loss = nn.HuberLoss()
-        self.optim = torch.optim.RMSprop(self.policy_net.parameters(), lr=2.5e-4, momentum=0.95)
+        self.optim = torch.optim.RMSprop(self.policy_net.parameters(), lr=0.00025, momentum=0.95)
 
         # Evaluation
         self.episode_metrics = EpisodeMetric(self.logger)
@@ -101,9 +103,9 @@ class DQN:
         self.eval_horizon = 10000
 
         print("Buffer creation")
-        self.buffer_length = 50000
+        self.buffer_length = 100000
         self.replay_buffer = deque(maxlen=self.buffer_length)
-        self.init_buffer_size = 50000
+        self.init_buffer_size = 100000
         print("Populating buffer")
         self.pre_populate_buffer()
 
@@ -141,14 +143,7 @@ class DQN:
         return action
 
     def reward_filter(self, reward):
-        if reward == 0:
-            return reward
-        elif reward > 0:
-            return 1
-        elif reward < 0:
-            return -1
-        else:
-            raise ValueError("????????")
+        return int(np.sign(reward))
 
     def env_step(self, action=None):
         old_state = self.state_buffer.state
@@ -174,6 +169,7 @@ class DQN:
     def update_q_func(self):
         # Sample batch from buffer
         batch_list = random.sample(self.replay_buffer, self.batch_size)
+        random.shuffle(batch_list)
         states, actions, rewards, not_terminal = list(zip(*batch_list))
 
         # Get predicted Q values
@@ -186,7 +182,11 @@ class DQN:
         r_t = torch.tensor(rewards, device=self.device)  # Bx1
         end_mask = torch.tensor(not_terminal, dtype=int, device=self.device)
         s_next_t = torch.tensor(states_np[:, 1:], dtype=torch.float32, device=self.device)
-        next_q_vals, _ = self.target_net(s_next_t).max(axis=1)
+        if self.DDQN:
+            actions = torch.argmax(self.policy_net(s_next_t), dim=1).unsqueeze(1)
+            next_q_vals = self.target_net(s_next_t).gather(1,actions).squeeze(1)
+        else:
+            next_q_vals, _ = self.target_net(s_next_t).max(axis=1)
         targets = r_t + self.gamma * end_mask * next_q_vals.detach()
 
         # Do an update step
@@ -204,7 +204,7 @@ class DQN:
 
     def eval_average_reward(self):
         rewards_list = []
-        # frames_list = []
+        frames_list = []
         eval_env = gym.make(self.env_type, obs_type="grayscale")
 
         def get_action_eval(env, eps, buffer):
@@ -238,15 +238,19 @@ class DQN:
             eval_buffer.add_frame(new_frame)
             rewards_list[-1] += reward
 
-            # if frames_list is not None:
-            #     frames_list.append(eval_buffer.state[-1].unsqueeze(0))
+            if frames_list is not None:
+                frames_list.append(eval_buffer.state[-1])
 
             if terminated or truncated:
-                # if frames_list is not None:
-                # video_frames = torch.stack(frames_list).unsqueeze(0)
-                # self.logger.add_video("eval/trajectory", video_frames, fps=15)
-                # print("wrote video")
-                # frames_list = None
+                if frames_list is not None:
+                    height, width = frames_list[0].shape
+                    size = (width,height)
+                    vid_file = os.path.join(self.output_path, f"{self.global_train_step}.avi")
+                    out = cv2.VideoWriter(vid_file,cv2.VideoWriter_fourcc(*'DIVX'), 15, size, 0)
+                    for frame in frames_list:
+                        out.write(frame)
+                    out.release()
+                    frames_list = None
                 eval_env, eval_buffer, rewards_list = reset_eval_env(eval_env, rewards_list)
                 episode_len.append(0)
             else:
@@ -262,6 +266,8 @@ class DQN:
             sum(episode_len) / len(episode_len),
             global_step=self.eval_num,
         )
+        
+        print("Eval reward:", round(avg_reward,2))
 
         self.eval_num += 1
 

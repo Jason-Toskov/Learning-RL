@@ -1,54 +1,44 @@
+import yaml
+
 import numpy as np
 import torch
-from torch.nn import functional as F
-
 from stable_baselines3.common.env_util import make_atari_env
 from stable_baselines3.common.vec_env import VecFrameStack
+from torch.nn import functional as F
 from tqdm import tqdm
 
-from models import QNetwork
-from buffers import RandomBuffer
+from q_networks.utils.buffers import RandomBuffer
+from q_networks.utils.models import QNetwork
+from q_networks.configs.params import DQNParams
 
 
 class DQNTrainer:
-    def __init__(self):
-        self.vec_env = make_atari_env("BoxingNoFrameskip-v4")
-        self.env = VecFrameStack(self.vec_env, n_stack=4)
+    def __init__(self, config_path):
+        with open(config_path, 'r') as f:
+            self.cfg = DQNParams.parse_obj(yaml.safe_load(f))
+        
+        self.vec_env = make_atari_env(f"{self.cfg.env.type.value}")
+        self.env = VecFrameStack(self.vec_env, n_stack=self.cfg.env.history)
         self.obs_shape = self.env.observation_space.shape
         self.obs_dtype = self.env.observation_space.dtype
         self.action_dim = 1
         self.action_len = self.env.action_space.n
         self.action_dtype = self.env.action_space.dtype
-        self.gamma = 0.99
-        self.frame_stack = 4
         self.last_obs = self.env.reset()
         
-        
         self.step = 0
-        self.max_steps = 10_000_000
-        self.pbar = tqdm(range(self.max_steps))
+        self.episode_num = 0
+        self.pbar = tqdm(range(self.cfg.train.max_steps))
         
-        self.start_learning = 100_000
-        
-        self.eps = 1
-        self.eps_start = 1
-        self.eps_end = 0.01
-        self.eps_steps_final = 1_000_000
-        
-        self.train_freq = 4
-        
+        self.eps = self.cfg.eps.start
         self.device = 0 if torch.cuda.is_available() else "cpu"
-        self.policy_net = QNetwork(self.frame_stack, self.env.action_space.n).to(self.device)
-        self.target_net = QNetwork(self.frame_stack, self.env.action_space.n).to(self.device)
+        self.policy_net = QNetwork(self.cfg.env.history, self.action_len).to(self.device)
+        self.target_net = QNetwork(self.cfg.env.history, self.action_len).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
-        self.target_update_interval = 1000
-        self.batch_size = 32
-        self.max_grad_norm = 10
-        self.grad_steps = 1
 
         self.buffer = RandomBuffer(
-            buffer_size = 100_000,
+            buffer_size = self.cfg.buffer.size,
             obs_shape = self.obs_shape,
             obs_dtype = self.obs_dtype,
             action_dim = self.action_dim,
@@ -56,11 +46,13 @@ class DQNTrainer:
             device = self.device
         )
         
-        self.episode_num = 0
         self.episode_reward = [0]
         self.losses = []
         
-        self.optim = torch.optim.Adam(self.policy_net.parameters(), lr=1e-4)
+        self.optim = torch.optim.Adam(
+            self.policy_net.parameters(), 
+            lr=self.cfg.train.lr,
+        )
         
     def obs_to_tensor(self, obs):
         if isinstance(obs, np.ndarray):
@@ -70,7 +62,7 @@ class DQNTrainer:
         return obs
         
     def sample_actions(self, random=False):
-        if self.step < self.start_learning or random or np.random.rand() < self.eps:
+        if self.step < self.cfg.train.start_step or random or np.random.rand() < self.eps:
             action = np.array([self.env.action_space.sample()])
         else:
             obs = self.obs_to_tensor(self.last_obs).to(self.device)
@@ -80,21 +72,23 @@ class DQNTrainer:
         return action
     
     def end_step(self):
-        if self.step % self.target_update_interval == 0:
+        if self.step % self.cfg.train.target_update_steps == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
         
-        if self.eps > self.eps_end:
-            self.eps = self.eps - ((self.eps_start - self.eps_end) / self.eps_steps_final)
-        else:
-            self.eps = self.eps_end
-            
+        self.eps = self.cfg.eps.schedule(
+            self.step, 
+            self.cfg.eps.start, 
+            self.cfg.eps.end, 
+            self.cfg.eps.steps
+        )
+        
         self.step += 1
         
         self.pbar.update(1)
         
     def run_rollouts(self):
         self.policy_net.eval()
-        for rollout_step in range(self.train_freq):
+        for rollout_step in range(self.cfg.train.update_freq):
             
             action = self.sample_actions()
             
@@ -133,8 +127,8 @@ class DQNTrainer:
     def run_updates(self):
         self.policy_net.train()
         
-        for _ in range(self.grad_steps):
-            replay_data = self.buffer.sample(self.batch_size)
+        for _ in range(self.cfg.train.grad_steps):
+            replay_data = self.buffer.sample(self.cfg.train.batch_size)
             
             with torch.no_grad():
                 # Compute the next Q-values using the target network
@@ -145,7 +139,7 @@ class DQNTrainer:
                 # Avoid potential broadcast issue
                 next_q_values = next_q_values.reshape(-1, 1)
                 # 1-step TD target
-                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.cfg.env.gamma * next_q_values
             
             # Get current Q-values estimates
             obs_tens = self.obs_to_tensor(replay_data.observations)
@@ -162,19 +156,19 @@ class DQNTrainer:
             self.optim.zero_grad()
             loss.backward()
             # Clip gradient norm
-            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), self.cfg.train.max_grad_norm)
             self.optim.step()
     
     def train(self):
-        while self.step < self.max_steps:
+        while self.step < self.cfg.train.max_steps:
             self.run_rollouts()
             
-            if self.step > self.start_learning:
+            if self.step > self.cfg.train.start_step:
                 self.run_updates()
         
 
 if __name__ == "__main__":
+    config_path = "/home/jason/projects/Learning-RL/q_networks/configs/dqn_config.yaml"
     
-    
-    model = DQNTrainer()
+    model = DQNTrainer(config_path)
     model.train()

@@ -1,7 +1,9 @@
 from typing import NamedTuple, Union
-import torch
+
 import numpy as np
-from numpy._typing import _ShapeLike, DTypeLike
+import torch
+from numpy._typing import DTypeLike, _ShapeLike
+
 
 class ReplayBufferSamples(NamedTuple):
     observations: torch.Tensor

@@ -64,6 +64,7 @@ class CallableEnum(Enum):
 class EnvType(str, EnumByName):
     pong = "PongNoFrameskip-v4"
     boxing = "BoxingNoFrameskip-v4"
+    road_runner = "RoadRunnerNoFrameskip-v4"
 
 
 class EpsDecayMethod(EnumByName, CallableEnum):

@@ -32,6 +32,22 @@ class TrainingConfig(BaseModel):
     target_update_steps: int
     
     lr: float # Learning rate
+    
+class NetworkConfig(BaseModel):
+    ddqn: bool
+
+
+class LogConfig(BaseModel):
+    path: str
+    run: str
+    
+
+class EvaluationConfig(BaseModel):
+    frequency: int
+    noop_max: int
+    n_episodes: int
+    ep_max_frames: int
+    eps: float
 
 
 class DQNParams(BaseModel):
@@ -39,3 +55,6 @@ class DQNParams(BaseModel):
     eps: ExplorationConfig
     train: TrainingConfig
     buffer: BufferConfig
+    net: NetworkConfig
+    log: LogConfig
+    eval: EvaluationConfig

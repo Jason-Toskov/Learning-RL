@@ -5,17 +5,24 @@ import torch
 from stable_baselines3.common.env_util import make_atari_env
 from stable_baselines3.common.vec_env import VecFrameStack
 from torch.nn import functional as F
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
+from q_networks import ROOT
 from q_networks.utils.buffers import RandomBuffer
+from q_networks.utils.helpers import obs_to_tensor
 from q_networks.utils.models import QNetwork
 from q_networks.configs.params import DQNParams
+from q_networks.eval import Evaluator
 
 
 class DQNTrainer:
-    def __init__(self, config_path):
+    def __init__(self, config_path: str):
         with open(config_path, 'r') as f:
             self.cfg = DQNParams.parse_obj(yaml.safe_load(f))
+            
+        self.tb = SummaryWriter(ROOT / self.cfg.log.path / self.cfg.log.run)
+        # self.tb.add_hparams(hparam_dict=self.cfg,run_name=self.cfg.log.run)
         
         self.vec_env = make_atari_env(f"{self.cfg.env.type.value}")
         self.env = VecFrameStack(self.vec_env, n_stack=self.cfg.env.history)
@@ -54,18 +61,13 @@ class DQNTrainer:
             lr=self.cfg.train.lr,
         )
         
-    def obs_to_tensor(self, obs):
-        if isinstance(obs, np.ndarray):
-            obs = torch.tensor(obs)
-        obs = torch.permute(obs, (0,3,1,2))
-        obs = (obs.float() / 255)
-        return obs
+        self.evaluator = Evaluator(self.cfg, self.tb)
         
     def sample_actions(self, random=False):
         if self.step < self.cfg.train.start_step or random or np.random.rand() < self.eps:
             action = np.array([self.env.action_space.sample()])
         else:
-            obs = self.obs_to_tensor(self.last_obs).to(self.device)
+            obs = obs_to_tensor(self.last_obs).to(self.device)
             with torch.no_grad():
                 action = self.policy_net(obs).argmax(dim=1).reshape(-1).cpu().numpy()
         
@@ -82,8 +84,10 @@ class DQNTrainer:
             self.cfg.eps.steps
         )
         
-        self.step += 1
+        if self.step % self.cfg.eval.frequency == 0:
+            self.evaluator.run_evaluation(self.policy_net, self.step)
         
+        self.step += 1
         self.pbar.update(1)
         
     def run_rollouts(self):
@@ -132,17 +136,23 @@ class DQNTrainer:
             
             with torch.no_grad():
                 # Compute the next Q-values using the target network
-                next_tens = self.obs_to_tensor(replay_data.next_observations)
-                next_q_values = self.target_net(next_tens)
-                # Follow greedy policy: use the one with the highest value
-                next_q_values, _ = next_q_values.max(dim=1)
-                # Avoid potential broadcast issue
-                next_q_values = next_q_values.reshape(-1, 1)
+                next_tens = obs_to_tensor(replay_data.next_observations)
+                target_q_next = self.target_net(next_tens)
+                if self.cfg.net.ddqn:
+                    # Choose action from policy net
+                    policy_q_next = self.policy_net(next_tens)
+                    policy_actions = policy_q_next.argmax(dim=1).reshape(-1,1)
+                    # Q values are the Q from the target given the policy action
+                    next_q_values = torch.gather(target_q_next, dim=1, index=policy_actions.long())
+                else:
+                    # Follow greedy policy: use the one with the highest value
+                    next_q_values = target_q_next.max(dim=1)[0].reshape(-1, 1)
+                    
                 # 1-step TD target
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.cfg.env.gamma * next_q_values
             
             # Get current Q-values estimates
-            obs_tens = self.obs_to_tensor(replay_data.observations)
+            obs_tens = obs_to_tensor(replay_data.observations)
             current_q_values = self.policy_net(obs_tens)
             
             # Retrieve the q-values for the actions from the replay buffer

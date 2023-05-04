@@ -24,3 +24,17 @@ train:
   target_update_steps: 1_000
   
   lr: 0.0001
+
+net:
+  ddqn: true
+
+log:
+  path: run_tracking
+  run: pong_ddqn
+
+eval:
+  frequency: 50_000
+  noop_max: 30
+  n_episodes: 10
+  ep_max_frames: 18_000
+  eps: 0.01

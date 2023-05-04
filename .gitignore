@@ -5,6 +5,7 @@
 venv/
 
 runs/
+run_tracking/
 logs/
 outputs*
 rewards*.txt

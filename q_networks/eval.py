@@ -23,6 +23,7 @@ class Evaluator:
         self.vec_env = make_atari_env(f"{self.cfg.env.type.value}")
         self.env = VecFrameStack(self.vec_env, n_stack=self.cfg.env.history)
         self.step = None
+        self.last_obs = None
         
         
     def run_evaluation(self, policy_net: QNetwork, global_step: int):
@@ -30,8 +31,10 @@ class Evaluator:
         self.record_episode(policy_net, global_step)
         
     def eval_episodes(self, policy_net: QNetwork, global_step: int):
+        policy_net.eval()
         reward_list = []
-        for ep_num in tqdm(range(self.cfg.eval.n_episodes), desc="Eval episode"):
+        value_estimates = []
+        for ep_num in tqdm(range(self.cfg.eval.n_episodes), desc="Eval episode", leave=False):
             self.last_obs = self.env.reset()
             noop_steps = randint(0,self.cfg.eval.noop_max)
             self.step = 0
@@ -47,11 +50,15 @@ class Evaluator:
                     else:
                         obs = obs_to_tensor(self.last_obs).to(self.device)
                         with torch.no_grad():
-                            action = policy_net(obs).argmax(dim=1).reshape(-1).cpu().numpy()
+                            action_values = policy_net(obs)
+                            value, action = torch.max(action_values, dim=1)
+                            value_estimates.append(value.cpu().item()) # Value of current state
+                            action = action.reshape(-1).cpu().numpy() # Action to take
                 
                 new_obs, rewards, dones, infos = self.env.step(action)
                 self.last_obs = new_obs
                 reward_accumulator += rewards.item()
+                self.step += 1
                 
                 if dones[0]:
                     reward_list.append(reward_accumulator)
@@ -59,6 +66,9 @@ class Evaluator:
         
         mean_ep_reward = np.mean(reward_list)
         self.tb.add_scalar("eval/average_reward", mean_ep_reward, global_step)
+        
+        avg_value_est = np.mean(value_estimates)
+        self.tb.add_scalar("eval/value_estimate", avg_value_est, global_step)
     
     def obs_to_frame(self, obs):
         obs = np.expand_dims(obs[0], -1)

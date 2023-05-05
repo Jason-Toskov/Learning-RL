@@ -36,6 +36,7 @@ class DQNTrainer:
         self.step = 0
         self.episode_num = 0
         self.pbar = tqdm(range(self.cfg.train.max_steps))
+        self.pbar.set_description("train step")
         
         self.eps = self.cfg.eps.start
         self.device = 0 if torch.cuda.is_available() else "cpu"
@@ -53,7 +54,7 @@ class DQNTrainer:
             device = self.device
         )
         
-        self.episode_reward = [0]
+        self.episode_reward = 0
         self.losses = []
         
         self.optim = torch.optim.Adam(
@@ -74,6 +75,9 @@ class DQNTrainer:
         return action
     
     def end_step(self):
+        self.tb.add_scalar("train/epsilon", self.eps, self.step)
+        self.tb.add_scalar("train/episode", self.episode_num, self.step)
+        
         if self.step % self.cfg.train.target_update_steps == 0:
             self.target_net.load_state_dict(self.policy_net.state_dict())
         
@@ -90,47 +94,35 @@ class DQNTrainer:
         self.step += 1
         self.pbar.update(1)
         
+    def end_episode(self):
+        self.tb.add_scalar("train/episode_reward", self.episode_reward, self.step)
+        if len(self.losses) == 0:
+            self.losses = [0]
+        self.tb.add_scalar("train/mean_episode_loss", np.mean(self.losses), self.step)
+        
+        self.episode_reward = 0
+        self.losses = []
+        self.episode_num += 1
+        self.last_obs = self.env.reset()
+
     def run_rollouts(self):
         self.policy_net.eval()
         for rollout_step in range(self.cfg.train.update_freq):
             
             action = self.sample_actions()
-            
             new_obs, rewards, dones, infos = self.env.step(action)
+            self.buffer.add(self.last_obs, new_obs, action, rewards, dones, infos)
             
-            self.buffer.add(
-                self.last_obs,
-                new_obs,
-                action,
-                rewards,
-                dones,
-                infos
-            )
-            
+            self.episode_reward += rewards[0]
             self.last_obs = new_obs
-            
             self.end_step()
             
-            self.episode_reward[-1] += rewards[0]
             for idx, done in enumerate(dones):
                 if done:
-                    self.episode_num += 1
-                    self.last_obs = self.env.reset()
-                    
-                    if len(self.episode_reward) < 10:
-                        self.episode_reward.append(0)
-                    else:
-                        print(np.mean(self.episode_reward))
-                        with open("./rewards.txt","a") as f:
-                            if len(self.losses) == 0:
-                                self.losses = [0]
-                            f.write(f"{self.step}, {np.mean(self.episode_reward)}, {self.eps:.4f}, {np.mean(self.losses)}\n")
-                        self.episode_reward = [0]
-                        self.losses = []
+                    self.end_episode()
         
     def run_updates(self):
         self.policy_net.train()
-        
         for _ in range(self.cfg.train.grad_steps):
             replay_data = self.buffer.sample(self.cfg.train.batch_size)
             

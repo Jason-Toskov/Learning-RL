@@ -10,8 +10,14 @@ eps:
   schedule: "linear"
 
 buffer:
-  size: 100_000
   method: "random"
+  options:
+    base:
+      size: 100_000
+    random: {}
+    priority:
+      alpha: 0.5
+      beta: 0.4
 
 train:
   max_steps: 10_000_000
@@ -30,7 +36,7 @@ net:
 
 log:
   path: run_tracking
-  run: pong_ddqn
+  run: test_abc_buffer
 
 eval:
   frequency: 50_000

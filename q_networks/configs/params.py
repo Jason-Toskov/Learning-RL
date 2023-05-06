@@ -1,18 +1,28 @@
-from pydantic import BaseModel
+from typing import Dict
+from pydantic import BaseModel, validator
 
-from q_networks.configs.enums import BufferType, EnvType, EpsDecayMethod
+from q_networks.configs.enums import EnvType, EpsDecayMethod
+from q_networks.utils.buffers import BaseBufferOptions, BufferType, RandomBufferOptions, PriorityBufferOptions
 
 
 class EnvConfig(BaseModel):
     type: EnvType
     gamma: float
     history: int
-    
-    
-class BufferConfig(BaseModel):
-    size: int
-    method: BufferType
 
+BUFFER_OPTION_MAP: Dict[BufferType, BaseBufferOptions] = {
+    BufferType.random: RandomBufferOptions,
+    BufferType.priority: PriorityBufferOptions,
+}
+
+class BufferConfig(BaseModel):
+    method: BufferType
+    options: Dict[str, dict]
+    
+    @validator("options", always=True)
+    def validate_date(cls, value, values) -> BaseBufferOptions:
+        buffer_type: BufferType = values["method"]
+        return BUFFER_OPTION_MAP[buffer_type](**value["base"], **value[buffer_type.name])
 
 class ExplorationConfig(BaseModel):
     start: float

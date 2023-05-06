@@ -1,9 +1,13 @@
+from abc import ABC,abstractmethod 
 from typing import NamedTuple, Union
+from functools import partial
 
 import numpy as np
 import torch
 from numpy._typing import DTypeLike, _ShapeLike
+from pydantic import BaseModel
 
+from q_networks.configs.enums import EnumByName, CallableEnum
 
 class ReplayBufferSamples(NamedTuple):
     observations: torch.Tensor
@@ -12,10 +16,22 @@ class ReplayBufferSamples(NamedTuple):
     dones: torch.Tensor
     rewards: torch.Tensor
 
-class RandomBuffer:
+# TODO: move these to their own file like `buffer_params.py`
+class BaseBufferOptions(BaseModel):
+    size: int
+    
+class RandomBufferOptions(BaseBufferOptions):
+    pass
+
+class PriorityBufferOptions(BaseBufferOptions):
+    alpha: float 
+    beta: float
+
+
+class BaseBuffer(ABC):
     def __init__(
         self, 
-        buffer_size: int, 
+        params: BaseBufferOptions, 
         obs_shape: _ShapeLike,
         obs_dtype: DTypeLike,
         action_dim: _ShapeLike,
@@ -24,11 +40,37 @@ class RandomBuffer:
     ):
         self.device = device
         
-        self.buffer_size = buffer_size
+        self.params = params
+        self.buffer_size = self.params.size
+        
         self.obs_shape = obs_shape
         self.obs_dtype = obs_dtype
         self.action_dim = action_dim
         self.act_dtype = act_dtype
+    
+    @abstractmethod
+    def size(self) -> int:
+        """Should return the current buffer size"""
+        pass
+        
+    @abstractmethod
+    def reset(self) -> None:
+        """Should reset and clear the buffer"""
+        pass
+    
+    @abstractmethod
+    def add(self, obs, next_obs, action, reward, done, info) -> None:
+        """Add a transition to the buffer"""
+        pass
+    
+    @abstractmethod
+    def sample(self, batch_size):
+        """Should return a batch of samples"""
+        pass
+
+class RandomBuffer(BaseBuffer):
+    def __init__(self, params: RandomBufferOptions, *args, **kwargs):
+        super().__init__(params, *args, **kwargs)
         
         self.observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=self.obs_dtype)
         self.next_observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=self.obs_dtype)
@@ -93,3 +135,12 @@ class RandomBuffer:
         if copy:
             return torch.tensor(array, device=self.device)
         return torch.as_tensor(array, device=self.device)
+    
+    
+class PriorityBuffer(BaseBuffer):
+    pass
+
+
+class BufferType(EnumByName, CallableEnum):
+    random = partial(RandomBuffer)
+    priority = partial(PriorityBuffer)

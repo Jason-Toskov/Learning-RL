@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from q_networks import ROOT
-from q_networks.utils.buffers import RandomBuffer
+from q_networks.utils.buffers import BaseBuffer
 from q_networks.utils.helpers import obs_to_tensor
 from q_networks.utils.models import QNetwork
 from q_networks.configs.params import DQNParams
@@ -45,13 +45,13 @@ class DQNTrainer:
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
 
-        self.buffer = RandomBuffer(
-            buffer_size = self.cfg.buffer.size,
+        self.buffer: BaseBuffer = self.cfg.buffer.method(
+            params = self.cfg.buffer.options,
             obs_shape = self.obs_shape,
             obs_dtype = self.obs_dtype,
             action_dim = self.action_dim,
             act_dtype = self.action_dtype,
-            device = self.device
+            device = self.device,
         )
         
         self.episode_reward = 0

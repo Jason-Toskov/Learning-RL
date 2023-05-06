@@ -3,7 +3,6 @@ from functools import partial
 
 import pydantic
 
-from q_networks.utils.buffers import RandomBuffer
 from q_networks.utils.epsilon_decay_schedule import linear_decay
 
 # https://github.com/pydantic/pydantic/discussions/2980
@@ -69,7 +68,3 @@ class EnvType(str, EnumByName):
 
 class EpsDecayMethod(EnumByName, CallableEnum):
     linear = partial(linear_decay)
-
-    
-class BufferType(EnumByName, CallableEnum):
-    random = partial(RandomBuffer)

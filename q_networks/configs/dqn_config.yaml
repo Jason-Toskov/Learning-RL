@@ -18,6 +18,7 @@ buffer:
     priority:
       alpha: 0.5
       beta: 0.4
+      prio_type: "proportional"
 
 train:
   max_steps: 10_000_000
@@ -36,7 +37,7 @@ net:
 
 log:
   path: run_tracking
-  run: test_abc_buffer
+  run: test_abc_buffer_1
 
 eval:
   frequency: 50_000

@@ -9,7 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from q_networks import ROOT
-from q_networks.utils.buffers import BaseBuffer
+from q_networks.utils.buffers import BaseBuffer, BufferType
 from q_networks.utils.helpers import obs_to_tensor
 from q_networks.utils.models import QNetwork
 from q_networks.configs.params import DQNParams
@@ -47,6 +47,7 @@ class DQNTrainer:
 
         self.buffer: BaseBuffer = self.cfg.buffer.method(
             params = self.cfg.buffer.options,
+            max_steps = self.cfg.train.max_steps, # For prio buffer
             obs_shape = self.obs_shape,
             obs_dtype = self.obs_dtype,
             action_dim = self.action_dim,
@@ -124,7 +125,7 @@ class DQNTrainer:
     def run_updates(self):
         self.policy_net.train()
         for _ in range(self.cfg.train.grad_steps):
-            replay_data = self.buffer.sample(self.cfg.train.batch_size)
+            replay_data = self.buffer.sample(self.cfg.train.batch_size, self.step)
             
             with torch.no_grad():
                 # Compute the next Q-values using the target network
@@ -151,7 +152,12 @@ class DQNTrainer:
             current_q_values = torch.gather(current_q_values, dim=1, index=replay_data.actions.long())
             
             # Compute Huber loss (less sensitive to outliers)
-            loss = F.smooth_l1_loss(current_q_values, target_q_values)
+            td_errors = F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')
+            # Update td errors in buffer 
+            if self.cfg.buffer.method == BufferType.priority:
+                self.buffer.update_td_errors(td_errors.cpu().numpy(), replay_data.batch_idx)
+            # Compute loss (need to weight errors)
+            loss = torch.mean(td_errors * replay_data.weights)
             self.losses.append(loss.item())
             
             # Optimize the policy

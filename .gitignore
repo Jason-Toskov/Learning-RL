@@ -4,7 +4,7 @@
 
 venv/
 
-runs/
+runs*/
 run_tracking/
 logs/
 outputs*

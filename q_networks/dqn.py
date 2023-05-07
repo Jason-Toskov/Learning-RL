@@ -151,13 +151,13 @@ class DQNTrainer:
             # Retrieve the q-values for the actions from the replay buffer
             current_q_values = torch.gather(current_q_values, dim=1, index=replay_data.actions.long())
             
-            # Compute Huber loss (less sensitive to outliers)
-            td_errors = F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')
             # Update td errors in buffer 
             if self.cfg.buffer.method == BufferType.priority:
-                self.buffer.update_td_errors(td_errors.cpu().numpy(), replay_data.batch_idx)
-            # Compute loss (need to weight errors)
-            loss = torch.mean(td_errors * replay_data.weights)
+                td_errors = torch.abs(target_q_values - current_q_values).detach().squeeze(-1)
+                self.buffer.update_priorities(replay_data.batch_idx, td_errors)
+            # Compute Huber loss (less sensitive to outliers)
+            loss_unweighted = F.smooth_l1_loss(current_q_values, target_q_values, reduction='none')
+            loss = torch.mean(loss_unweighted * replay_data.weights)
             self.losses.append(loss.item())
             
             # Optimize the policy

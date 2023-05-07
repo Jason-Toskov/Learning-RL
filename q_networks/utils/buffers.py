@@ -1,4 +1,5 @@
 from abc import ABC,abstractmethod
+import random
 from typing import NamedTuple, Union
 from functools import partial
 
@@ -8,6 +9,8 @@ from numpy._typing import DTypeLike, _ShapeLike
 from pydantic import BaseModel
 
 from q_networks.configs.enums import EnumByName, CallableEnum
+from q_networks.utils.helpers import SumTree
+
 
 class ReplayBufferSamples(NamedTuple):
     observations: torch.Tensor
@@ -23,16 +26,21 @@ class PriorityType(EnumByName):
     proportional = 0
     rank = 1
 
+
 class BaseBufferOptions(BaseModel):
     size: int
-    
+
+
 class RandomBufferOptions(BaseBufferOptions):
     pass
 
+
 class PriorityBufferOptions(BaseBufferOptions):
+    eps: float
     alpha: float 
     beta: float
     prio_type: PriorityType
+
 
 class BaseBuffer(ABC):
     def __init__(
@@ -74,6 +82,7 @@ class BaseBuffer(ABC):
     def sample(self, batch_size: int, step: int)  -> ReplayBufferSamples:
         """Should return a batch of samples"""
         pass
+
 
 class RandomBuffer(BaseBuffer):
     def __init__(self, params: RandomBufferOptions, *args, **kwargs):
@@ -135,7 +144,7 @@ class RandomBuffer(BaseBuffer):
             # deactivated by default (timeouts is initialized as an array of False)
             self.dones[batch_inds].reshape(-1, 1),
             self.rewards[batch_inds].reshape(-1, 1),
-            np.ones(batch_size),
+            np.ones(batch_size).reshape(-1, 1),
         )
         return ReplayBufferSamples(*tuple(map(self.to_torch, data)), batch_inds)
 
@@ -144,68 +153,36 @@ class RandomBuffer(BaseBuffer):
             return torch.tensor(array, device=self.device)
         return torch.as_tensor(array, device=self.device)
     
-    
+
+# Taken from: https://github.com/Howuhh/prioritized_experience_replay
 class PriorityBuffer(BaseBuffer):
     def __init__(self, params: PriorityBufferOptions, *args, max_steps, **kwargs):
         super().__init__(params, *args, **kwargs)
         self.params = params
         
+        self.tree = SumTree(size=self.buffer_size)
+        
         self.n_steps_total = max_steps
-        # Kept just at the max of the seen errors
-        self.max_prio_td = 1
+        self.max_prio = self.params.eps
         
         self.observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=self.obs_dtype)
         self.next_observations = np.zeros((self.buffer_size, *self.obs_shape), dtype=self.obs_dtype)
-    
         self.actions = np.zeros((self.buffer_size, self.action_dim), dtype=self.act_dtype)
-
         self.rewards = np.zeros((self.buffer_size), dtype=np.float32)
         self.dones = np.zeros((self.buffer_size), dtype=np.float32)
-        self.td_errors = np.zeros((self.buffer_size), dtype=np.float32)
         
-        # We need this because we're going to be doing a bunch of sorting
-        # This array will store the age of each sample at an index
-        self.sample_locs = np.array(range(self.buffer_size), dtype=int)
+        self.count = 0
+        self.real_size = 0
+           
+    def reset(self):
+        self.tree = SumTree(size=self.buffer_size)
+        self.max_prio = self.params.eps
+        self.count = 0
+        self.real_size = 0
         
-        # How we define priorities depends on the type
-        if self.params.prio_type == PriorityType.rank:
-            self.prios = (1 / np.arange(1, self.buffer_size+1, 1)) ** self.params.alpha
-        elif self.params.prio_type == PriorityType.proportional:
-            self.prios = np.zeros((self.buffer_size), dtype=np.float32)
-        else:
-            raise ValueError(f"Invalid priority replay buffer type: {self.params.prio_type}")
+    def size(self):
+        return self.real_size
         
-        self.buffer_len = 0
-        
-    @property
-    def sample_prob(self) -> np.ndarray:
-        """Probability distribution to use for sampling"""
-        if self.params.prio_type == PriorityType.proportional:
-            # Only update when we have to
-            self.prios[:self.buffer_len] = self.td_errors[:self.buffer_len] ** self.params.alpha
-        return self.prios[:self.buffer_len] / np.sum(self.prios[:self.buffer_len])
-    
-    def size(self) -> int:
-        return self.buffer_len
-        
-    def reset(self) -> None:
-        # To reset the buffer, set the length back to 0
-        self.buffer_len = 0
-        
-    def sort_transitions(self):
-        # Arranged order of elements w.r.t. td errors
-        # Keeps things easy to work with when it comes to prios
-        idx = np.argsort(self.td_errors[:self.buffer_len])
-        
-        self.observations[:self.buffer_len] = self.observations[:self.buffer_len][idx]
-        self.next_observations[:self.buffer_len] = self.next_observations[:self.buffer_len][idx]
-        self.actions[:self.buffer_len] = self.actions[:self.buffer_len][idx]
-        self.rewards[:self.buffer_len] = self.rewards[:self.buffer_len][idx]
-        self.dones[:self.buffer_len] = self.dones[:self.buffer_len][idx]
-        self.td_errors[:self.buffer_len] = self.td_errors[:self.buffer_len][idx]
-        
-        self.sample_locs[:self.buffer_len][idx]
-
     def add(
         self,
         obs: np.ndarray,
@@ -215,77 +192,73 @@ class PriorityBuffer(BaseBuffer):
         done: np.ndarray,
         info
     ) -> None:
-        # Index of oldest transition
-        if self.buffer_len < self.buffer_size:
-            # If not full, just keep filling
-            loc = self.buffer_len
-            # loc = self.sample_locs[self.buffer_len]
-        else:
-            # Decrement as the max should always be buffer_size-1
-            self.sample_locs -= 1
-            # Oldest element is lowest index
-            loc = np.argmin(self.sample_locs)
-            # Could also do (self.sample_locs < 0)[0] 
-            # (might be faster), as one 1 element ever less than 0 here
+        # store transition index with maximum priority in sum tree
+        self.tree.add(self.max_prio, self.count)
         
         # Copy to avoid modification by reference
-        self.observations[loc] = np.array(obs).copy()
-        self.next_observations[loc] = np.array(next_obs).copy()
+        self.observations[self.count] = np.array(obs).copy()
+        self.next_observations[self.count] = np.array(next_obs).copy()
+        self.actions[self.count] = np.array(action).copy()
+        self.rewards[self.count] = np.array(reward).copy()
+        self.dones[self.count] = np.array(done).copy()
         
-        self.actions[loc] = np.array(action).copy()
-        self.rewards[loc] = np.array(reward).copy()
-        self.dones[loc] = np.array(done).copy()
+        # update counters
+        self.count = (self.count + 1) % self.buffer_size
+        self.real_size = min(self.buffer_size, self.real_size + 1)
         
-        self.td_errors[loc] = self.max_prio_td
-        
-        if self.buffer_len < self.buffer_size:
-            # sample_locs are preset to be a range, so no update needed
-            self.buffer_len += 1
-        else:
-            # New transition is the freshest
-            self.sample_locs[loc] = self.buffer_size-1
-        
-        # Re-sort transitions
-        self.sort_transitions()
+    def sample(self, batch_size: int, step: int):
+        assert self.real_size >= batch_size, "buffer contains less samples than batch size"
     
-    def compute_IS_weights(self, sample_prs, batch_inds, step) -> np.ndarray:
-        """Compute importance sampling weight used to de-bias the gradient estimate"""
-        # Beta increases to 1 over the training
+        sample_idxs, tree_idxs = [], []
+        priorities = np.zeros(batch_size, dtype=np.float32)
+        
+        segment = self.tree.total / batch_size
+        for i in range(batch_size):
+            a, b = segment * i, segment * (i + 1)
+
+            cumsum = random.uniform(a, b)
+            # sample_idx is a sample index in buffer, needed further to sample actual transitions
+            # tree_idx is a index of a sample in the tree, needed further to update priorities
+            tree_idx, priority, sample_idx = self.tree.get(cumsum)
+
+            priorities[i] = priority
+            tree_idxs.append(tree_idx)
+            sample_idxs.append(sample_idx)
+        
+        probs = priorities / self.tree.total
+        
         beta = self.params.beta + (1-self.params.beta) * step / self.n_steps_total
-        weights = (1/(self.buffer_size*sample_prs[batch_inds]))**beta
-        weights_normalised = weights / np.max(weights)
-        return weights_normalised
-    
-    def sample(self, batch_size: int, step: int) -> ReplayBufferSamples:
-        sample_prs = self.sample_prob
-        batch_inds = np.random.choice(self.buffer_len, size=batch_size, p=sample_prs)
+        weights = (self.real_size * probs) ** -beta
+        weights = weights / weights.max()
         
         data = (
-            self.observations[batch_inds, :],
-            self.actions[batch_inds, :],
-            self.next_observations[batch_inds, :],
-            # Only use dones that are not due to timeouts
-            # deactivated by default (timeouts is initialized as an array of False)
-            self.dones[batch_inds].reshape(-1, 1),
-            self.rewards[batch_inds].reshape(-1, 1),
-            self.compute_IS_weights(sample_prs, batch_inds, step),
-        )
-        
-        return ReplayBufferSamples(*tuple(map(self.to_torch, data)), batch_inds)
+            self.observations[sample_idxs, :],
+            self.actions[sample_idxs, :],
+            self.next_observations[sample_idxs, :],
+            self.dones[sample_idxs].reshape(-1, 1),
+            self.rewards[sample_idxs].reshape(-1, 1),
+            weights.reshape(-1, 1)
+        )        
+        return ReplayBufferSamples(*tuple(map(self.to_torch, data)), tree_idxs)
     
-    def update_td_errors(self, td_errors, batch_inds):
-        new_td_errors = np.array(np.abs(td_errors)).copy()
-        self.td_errors[batch_inds] = new_td_errors
-        self.max_prio_td = np.max(np.concatenate((new_td_errors, np.array([self.max_prio_td]))))
-        self.sort_transitions()
+    def update_priorities(self, data_idxs, priorities):
+        if isinstance(priorities, torch.Tensor):
+            priorities = priorities.detach().cpu().numpy()
+
+        for data_idx, priority in zip(data_idxs, priorities):
+            # The first variant we consider is the direct, proportional prioritization where p_i = |δ_i| + eps,
+            # where eps is a small positive constant that prevents the edge-case of transitions not being
+            # revisited once their error is zero. (Section 3.3)
+            priority = (priority + self.params.eps) ** self.params.alpha
+
+            self.tree.update(data_idx, priority)
+            self.max_prio = max(self.max_prio, priority)
 
     def to_torch(self, array: np.ndarray, copy: bool = True) -> torch.Tensor:
         if copy:
             return torch.tensor(array, device=self.device)
         return torch.as_tensor(array, device=self.device)
         
-        
-
 
 class BufferType(EnumByName, CallableEnum):
     random = partial(RandomBuffer)

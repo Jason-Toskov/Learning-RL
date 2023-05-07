@@ -10,12 +10,13 @@ eps:
   schedule: "linear"
 
 buffer:
-  method: "random"
+  method: "priority"
   options:
     base:
       size: 100_000
     random: {}
     priority:
+      eps: 0.01
       alpha: 0.5
       beta: 0.4
       prio_type: "proportional"
@@ -37,7 +38,7 @@ net:
 
 log:
   path: run_tracking
-  run: test_abc_buffer_1
+  run: priority_buffer_pong
 
 eval:
   frequency: 50_000
